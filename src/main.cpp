@@ -120,6 +120,7 @@ int main() {
           double other_car_speed = 0;
           double other_car_s = current_car_s;
 
+          // go over all other cars detected around
           for(int i = 0; i < sensor_fusion.size(); i++)
           {
             // check whether the other car's d coordinate falls into the desired lane we want to drive in
@@ -143,9 +144,11 @@ int main() {
                 
                 // if in the future we can be in front of the other car (we go through - definite collision)
                 // OR we can be behind the other car BUT the distance is unsafe (we come too close)
+                double safety_distance_front = (car_speed * 1.6) * SAFETY_DISTANCE_FRONT;
                 if((car_s >= other_car_s_predicted) ||
-                    (car_s < other_car_s_predicted  && (other_car_s_predicted - car_s) < (car_speed * 1.6) * SAFETY_DISTANCE_FRONT))
+                    ((other_car_s_predicted - car_s) < safety_distance_front))
                 {
+                  std::cout << "Ego car is too close to the car in front. Ego car s: " << other_car_s_predicted << " m. Other car s: " << car_s << " m. Safety distance: " << safety_distance_front << " m" << std::endl;
                   // fire up the warning flag
                   too_close = true;
                   
@@ -251,20 +254,36 @@ int main() {
             }
           }
 
-          // if we're tool close to the other vehicle in our lane
+          // if we're too close to the other vehicle in our lane
           if(too_close)
           {
             // slow down
             if(target_velocity > other_car_speed)
-              target_velocity -= SPEED_INCREMENT_BRAKING;
+            {
+              if((target_velocity - other_car_speed) < SPEED_INCREMENT_BRAKING)
+              {
+                target_velocity = other_car_speed;
+              }
+              else
+              {
+                target_velocity -= SPEED_INCREMENT_BRAKING;
+              }
+            }
           }
           // if the lane ahead is clean
           else
           {
             // consider to speed up to the limit
-            if(target_velocity < SPEED_LIMIT - SPEED_INCREMENT_ACCELERATION)
+            if(target_velocity < SPEED_LIMIT)
             {
-              target_velocity += SPEED_INCREMENT_ACCELERATION;
+              if((SPEED_LIMIT - target_velocity) < SPEED_INCREMENT_ACCELERATION)
+              {
+                target_velocity = SPEED_LIMIT;
+              }
+              else
+              {
+                target_velocity += SPEED_INCREMENT_ACCELERATION;
+              }
             }
             
             // if we drive fast enough, the lane ahead is clean (therefore no lane change maneuver was considered), try to go to the lane on the right
@@ -292,16 +311,25 @@ int main() {
             lane_change_counter = 50 * MIN_LANE_CHANGE_INTERVAL;
           }
 
+          // generate additional points to travel into the lane that was decided
+          // using smooth spline and maintaining target velocity
+
           // Start with sparse way-points
           vector<double> sparse_points_x;
           vector<double> sparse_points_y;
+
+          // calculate origin of the car coordinate system at this moment
 
           double ref_x = car_x;
           double ref_y = car_y;
           double ref_yaw = deg2rad(car_yaw);
 
-          if(previous_path_size < 2)
+          // fill in two initial points into the spline input
+          if(previous_path_size < 1)
           {
+            // if there're no points in the unfinished path:
+            // just take the car position and calculate additional point in the past to make the path tangent according to the car's angle
+
             double prev_car_x = car_x - cos(car_yaw);
             double prev_car_y = car_y - sin(car_yaw);
 
@@ -313,12 +341,24 @@ int main() {
           }
           else
           {
+            // if there're points in the unfinished path:
+            // take the last point as the current reference
+
             ref_x = previous_path_x[previous_path_size - 1];
             ref_y = previous_path_y[previous_path_size - 1];
 
-            double ref_x_prev = previous_path_x[previous_path_size - 2];
-            double ref_y_prev = previous_path_y[previous_path_size - 2];
+            // if there're more than one points in the unfinished path:
+            // take the pre-last point into the spline and use it for the angle calculation
+            // otherwise just use the current car position
+            double ref_x_prev = car_x;
+            double ref_y_prev = car_y;
+            if(previous_path_size >= 2)
+            {
+              ref_x_prev = previous_path_x[previous_path_size - 2];
+              ref_y_prev = previous_path_y[previous_path_size - 2];
+            }
 
+            // calculate yaw angle at the reference car position
             ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
             
             sparse_points_x.push_back(ref_x_prev);
@@ -336,6 +376,7 @@ int main() {
             sparse_points_y.push_back(next_way_point[1]);
           }
 
+          // transform the points to the car coordinate system (first shift, then rotation)
           for(int i = 0; i < sparse_points_x.size(); i++)
           {
 
@@ -346,20 +387,27 @@ int main() {
             sparse_points_y[i] = shifted_x * sin(0-ref_yaw) + shifted_y * cos(0-ref_yaw);
           }
 
+          // create a new spline object
           tk::spline s;
 
+          // initialize it with sparse points
           s.set_points(sparse_points_x, sparse_points_y);
 
+          
+          // create vectors with resulting points that the car will travel
           vector<double> next_x_vals;
           vector<double> next_y_vals;
 
-          // fill in all the points from the previous path (not travelled yet)
+          // first fill in all the points from the previous path (not travelled yet)
           for(int i = 0; i < previous_path_size; i++)
           {
             next_x_vals.push_back(previous_path_x[i]);
             next_y_vals.push_back(previous_path_y[i]);
           }
 
+          // then generate and add missing points up to total 50 points, using spline
+
+          // pick up some reference point ahead (30 m is far enough for a second of travel at the speed no greater than 50 mph)
           double target_x = 30.0;
           double target_y = s(target_x);
           double target_distance = sqrt(target_x * target_x + target_y * target_y);
@@ -368,35 +416,29 @@ int main() {
           
           for(int i = 1; i <= 50 - previous_path_size; i++)
           {
+            // pick up the next point
             double N = target_distance / (0.02 * target_velocity / 2.24);
             double x_point = x_add_on + target_x / N;
             double y_point = s(x_point);
 
             x_add_on = x_point;
 
-            // rotate and shift back
-            double x_shift = x_point;
-            double y_shift = y_point;
-            x_point = x_shift * cos(ref_yaw) - y_shift * sin(ref_yaw);
-            y_point = x_shift * sin(ref_yaw) + y_shift * cos(ref_yaw);
-            x_point += ref_x;
-            y_point += ref_y;
-            
+            // transform the point back to the global coordinate system (first rotation, then shift)
+            double x_shift = x_point * cos(ref_yaw) - y_point * sin(ref_yaw);
+            double y_shift = x_point * sin(ref_yaw) + y_point * cos(ref_yaw);
+            x_point = x_shift + ref_x;
+            y_point = y_shift + ref_y;
+
+            // put the point into the resulting vectors
             next_x_vals.push_back(x_point);
             next_y_vals.push_back(y_point);
           }
 
-          /**
-           * TODO: define a path made up of (x,y) points that the car will visit
-           *   sequentially every .02 seconds
-           */
-          //vector<double> next_x_vals;
-          //vector<double> next_y_vals;
-          
-          /*
           // Driving straight line
-
           /*
+          vector<double> next_x_vals;
+          vector<double> next_y_vals;
+          
           double dist_inc = 0.5;
           for (int i = 0; i < 50; ++i) {
             next_x_vals.push_back(car_x+(dist_inc*i)*cos(deg2rad(car_yaw)));
@@ -405,6 +447,9 @@ int main() {
           */
           // in Frenet coordinates
           /*
+          vector<double> next_x_vals;
+          vector<double> next_y_vals;
+          
           double dist_inc = 0.5;
           for (int i = 0; i < 50; ++i) {
             double next_s = car_s + (i + 1) * dist_inc;
@@ -417,6 +462,9 @@ int main() {
 
           // Driving a circle
           /*
+          vector<double> next_x_vals;
+          vector<double> next_y_vals;
+          
           double pos_x;
           double pos_y;
           double angle;

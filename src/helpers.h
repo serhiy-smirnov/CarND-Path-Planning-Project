@@ -15,9 +15,9 @@ using std::vector;
 // distance_front is used to calculate how close the ego car will approach other car from behind
 #define SAFETY_DISTANCE_FRONT (1.0/3)
 // distance_front_overtake is used to calculate how close the ego car will approach other car from behind in case of a lane change
-#define SAFETY_DISTANCE_FRONT_OVERTAKE (1.0/4)
+#define SAFETY_DISTANCE_FRONT_OVERTAKE (1.0/3)
 // distance_back is used to calculate how much the ego car will leave to the vehicle coming from behind in case of a lane change
-#define SAFETY_DISTANCE_BACK_OVERTAKE (1.0/5)
+#define SAFETY_DISTANCE_BACK_OVERTAKE (1.0/4)
 
 // maximum cruising speed, mph
 #define SPEED_LIMIT 49.8
@@ -29,8 +29,8 @@ using std::vector;
 
 // minimum speed considered for the lane change to the right, mph (German "Rechtsfahrgebot")
 // to turn off this behaviour - simply set this value to speed limit or above, so that the car never reaches it
-//#define MIN_CRUISING_SPEED 40
-#define MIN_CRUISING_SPEED 50
+#define MIN_CRUISING_SPEED 40
+//#define MIN_CRUISING_SPEED 50
 
 // minimal interval between lane changes, seconds (to avoid shaking from lane to lane)
 #define MIN_LANE_CHANGE_INTERVAL  3
@@ -192,7 +192,7 @@ bool lane_is_busy(double ego_car_s, double ego_car_s_predicted, double ego_car_s
     double other_car_d = sensor_fusion[i][6];
     if(other_car_d > (target_lane * 4) && other_car_d < (target_lane * 4 + 4))
     {
-      std::cout << std::endl << "Checking car " << sensor_fusion[i][0] << " in the lane " << target_lane << std::endl;
+      //std::cout << std::endl << "Checking car " << sensor_fusion[i][0] << " in the lane " << target_lane << std::endl;
 
       // the other car is in our tagret lane
 
@@ -200,19 +200,22 @@ bool lane_is_busy(double ego_car_s, double ego_car_s_predicted, double ego_car_s
       double other_car_vy = sensor_fusion[i][4];
       double other_car_speed = sqrt(other_car_vx * other_car_vx + other_car_vy * other_car_vy);
       double other_car_s = sensor_fusion[i][5];
-      std::cout << "Other car s now   = " << other_car_s << std::endl;
+      //std::cout << "Other car s now   = " << other_car_s << std::endl;
       
       // predict other car's next position at the same time as we have in our path
       double other_car_s_predicted = other_car_s + other_car_speed * 0.02 * prediction_steps;
-      std::cout << "Other car s predicted   = " << other_car_s_predicted << std::endl;
-      if(other_car_s_predicted > ego_car_s_predicted && (other_car_s_predicted - ego_car_s_predicted) < (ego_car_speed * 3.6 * SAFETY_DISTANCE_FRONT_OVERTAKE))
+      //std::cout << "Other car s predicted   = " << other_car_s_predicted << std::endl;
+      // ego car speed is in mph - convert to kmh
+      double safety_distance_front = (ego_car_speed * 1.6) * SAFETY_DISTANCE_FRONT_OVERTAKE;
+      if(other_car_s_predicted > ego_car_s_predicted && (other_car_s_predicted - ego_car_s_predicted) < safety_distance_front)
       {
-        std::cout << "Other car will be in front but too close" << std::endl;
+        std::cout << "Other car will be in front but too close. Safety distance: " << safety_distance_front << " m, predicted distance: " << other_car_s_predicted - ego_car_s_predicted << " m" << std::endl;
         return true;
       }
-      if(ego_car_s_predicted > other_car_s_predicted  && (ego_car_s_predicted - other_car_s_predicted) < (other_car_speed * 3.6 * SAFETY_DISTANCE_BACK_OVERTAKE))
+      double safety_distance_back = other_car_speed * 3.6 * SAFETY_DISTANCE_BACK_OVERTAKE;
+      if(ego_car_s_predicted > other_car_s_predicted  && (ego_car_s_predicted - other_car_s_predicted) < safety_distance_back)
       {
-        std::cout << "Ego car will be in front but too close" << std::endl;
+        std::cout << "Ego car will be in front but too close. Safety distance: " << safety_distance_back << " m, predicted distance: " << ego_car_s_predicted - other_car_s_predicted << " m" << std::endl;
         return true;
       }
       if(other_car_s_predicted == ego_car_s_predicted)
@@ -239,7 +242,7 @@ double lane_speed(double ego_car_s_predicted, int target_lane, int prediction_st
     double other_car_d = sensor_fusion[i][6];
     if(other_car_d > (target_lane * 4) && other_car_d < (target_lane * 4 + 4))
     {
-      std::cout << std::endl << "Checking car " << sensor_fusion[i][0] << " in the lane " << target_lane << std::endl;
+      //std::cout << std::endl << "Checking car " << sensor_fusion[i][0] << " in the lane " << target_lane << std::endl;
 
       // the other car is in our tagret lane
 
@@ -247,11 +250,11 @@ double lane_speed(double ego_car_s_predicted, int target_lane, int prediction_st
       double other_car_vy = sensor_fusion[i][4];
       double other_car_speed = sqrt(other_car_vx * other_car_vx + other_car_vy * other_car_vy);
       double other_car_s = sensor_fusion[i][5];
-      std::cout << "Other car s now   = " << other_car_s << std::endl;
+      //std::cout << "Other car s now   = " << other_car_s << std::endl;
       
       // predict other car's next position at the same time as we have in our path
       double other_car_s_predicted = other_car_s + other_car_speed * 0.02 * prediction_steps;
-      std::cout << "Other car s predicted   = " << other_car_s_predicted << std::endl;
+      //std::cout << "Other car s predicted   = " << other_car_s_predicted << std::endl;
       if(other_car_s_predicted > ego_car_s_predicted)
       {
         double distance_to_the_other_car = other_car_s_predicted - ego_car_s_predicted;
