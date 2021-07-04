@@ -7,6 +7,7 @@
 #include "Eigen-3.3/Eigen/QR"
 #include "helpers.h"
 #include "json.hpp"
+#include "spline.h"
 
 // for convenience
 using nlohmann::json;
@@ -50,8 +51,15 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
 
+  // Lane index to start in
+  int current_lane = 1;
+  int lane_change_counter = 0;
+  
+  // Target velocity, mph
+  double target_velocity = 0.0;
+
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
-               &map_waypoints_dx,&map_waypoints_dy]
+               &map_waypoints_dx,&map_waypoints_dy,&current_lane,&target_velocity,&lane_change_counter]
               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -88,16 +96,361 @@ int main() {
           //   of the road.
           auto sensor_fusion = j[1]["sensor_fusion"];
 
-          json msgJson;
+          if(previous_path_x.size() != previous_path_y.size())
+          {
+            std::cout << "Incorrect input packet!!!" << std::endl;
+            return;
+          }
+
+          //std::cout << std::endl;
+          //std::cout << "Current car s = " << car_s << std::endl;
+          //std::cout << "End path s    = " << end_path_s << std::endl;
+          
+          int previous_path_size = previous_path_x.size();
+
+          double current_car_s = car_s;
+
+          if(previous_path_size > 0)
+          {
+            car_s = end_path_s;
+          }
+
+          bool too_close = false;
+          int target_lane = current_lane;
+          double other_car_speed = 0;
+          double other_car_s = current_car_s;
+
+          for(int i = 0; i < sensor_fusion.size(); i++)
+          {
+            // check whether the other car's d coordinate falls into the desired lane we want to drive in
+            double other_car_d = sensor_fusion[i][6];
+            if(other_car_d > (current_lane * 4) && other_car_d < (current_lane * 4 + 4))
+            {
+              // the other car is in our tagret lane
+
+              double other_car_vx = sensor_fusion[i][3];
+              double other_car_vy = sensor_fusion[i][4];
+              other_car_speed = sqrt(other_car_vx * other_car_vx + other_car_vy * other_car_vy);
+              other_car_s = sensor_fusion[i][5];
+              //std::cout << "Other car s now   = " << other_car_s << std::endl;
+              
+              // if the other car is now in front of us
+              if(current_car_s < other_car_s)
+              {
+                // predict other car's next position at the same time as we have in our path
+                double other_car_s_predicted = other_car_s + other_car_speed * 0.02 * previous_path_size;
+                //std::cout << "Other car s predicted   = " << other_car_s_predicted << std::endl;
+                
+                // if in the future we can be in front of the other car (we go through - definite collision)
+                // OR we can be behind the other car BUT the distance is unsafe (we come too close)
+                if((car_s >= other_car_s_predicted) ||
+                    (car_s < other_car_s_predicted  && (other_car_s_predicted - car_s) < (car_speed * 1.6) * SAFETY_DISTANCE_FRONT))
+                {
+                  // fire up the warning flag
+                  too_close = true;
+                  
+                  // and check for possible maneuvers
+
+                  // from the leftmost lane there's only one maneuver to check - lane change right
+                  if(current_lane == LEFTMOST_LANE)
+                  {
+                    // check if the lane on the right is not busy
+                    if(!lane_is_busy(current_car_s, car_s, car_speed, current_lane + 1, previous_path_size, sensor_fusion))
+                    {
+                      // change the lane to the right
+                      target_lane = current_lane + 1;
+                    }
+                  }
+                  // from the rightmost lane there's only one maneuver to check - lane change left
+                  else if(current_lane == RIGHTMOST_LANE)
+                  {
+                    // check if the lane on the left is not busy
+                    if(!lane_is_busy(current_car_s, car_s, car_speed, current_lane - 1, previous_path_size, sensor_fusion))
+                    {
+                      // change the lane to the left
+                      target_lane = current_lane - 1;
+                    }
+                  }
+                  // in the middle lane we can decide - left or right, depending on different criteria, e.g.
+                  //   - speed of the next preceding vehicle
+                  //   - average speed of all the preceding vehicles
+                  //   - other rules, like passing on the left only
+                  else
+                  {
+                    bool left_lane_busy = lane_is_busy(current_car_s, car_s, car_speed, current_lane - 1, previous_path_size, sensor_fusion);
+                    bool right_lane_busy = lane_is_busy(current_car_s, car_s, car_speed, current_lane + 1, previous_path_size, sensor_fusion);
+                    // if the left lane busy - there's only one chance
+                    if(left_lane_busy)
+                    {
+                      // can we go to the right?
+                      if(!right_lane_busy)
+                      {
+                        // change the lane to the right
+                        target_lane = current_lane + 1;
+                      }
+                    }
+                    // if the right lane busy - there's also only one chance
+                    else if(right_lane_busy)
+                    {
+                      // can we go to the left?
+                      if(!left_lane_busy)
+                      {
+                        // change the lane to the left
+                        target_lane = current_lane - 1;
+                      }
+                    }
+                    // if it is safe to change to either left or right lanes
+                    else
+                    {
+                      // check how fast they go
+                      double left_lane_speed = lane_speed(car_s, current_lane - 1, previous_path_size, sensor_fusion);
+                      double right_lane_speed = lane_speed(car_s, current_lane + 1, previous_path_size, sensor_fusion);
+                      // only if the right lane goes faster
+                      if(right_lane_speed > left_lane_speed)
+                      {
+                        // change the lane to the right
+                        target_lane = current_lane + 1;
+                      }
+                      // in all other cases - e.g. both left and right lanes go at the same speed or there're no leading cars
+                      else
+                      {
+                        // prefer passing in the left lane
+                        target_lane = current_lane - 1;
+                      }
+                    }
+                  }
+
+                  /*
+                  // simpler logic to cycle through the lanes, preferring change to the left lane from current
+
+                  // if we are not in the leftmost lane - try lane change to the left
+                  if(current_lane > 0)
+                  {
+                    // check if the lane on the left is not busy
+                    if(!lane_is_busy(current_car_s, car_s, car_speed, current_lane - 1, previous_path_size, sensor_fusion))
+                    {
+                      // change the lane to the left
+                      target_lane = current_lane - 1;
+                    }
+                  }
+
+                  // if we still didn't change the lane (either we're in the left-most lane already OR lane change to the left is not possible)
+                  // AND we're not in the rightmost lane
+                  if(target_lane == current_lane && current_lane < 2)
+                  {
+                    // check if the lane on the right is not busy
+                    if(!lane_is_busy(current_car_s, car_s, car_speed, current_lane + 1, previous_path_size, sensor_fusion))
+                    {
+                      // change the lane to the right
+                      target_lane = current_lane + 1;
+                    }
+                  }
+                  */
+                }
+              }
+            }
+          }
+
+          // if we're tool close to the other vehicle in our lane
+          if(too_close)
+          {
+            // slow down
+            if(target_velocity > other_car_speed)
+              target_velocity -= SPEED_INCREMENT_BRAKING;
+          }
+          // if the lane ahead is clean
+          else
+          {
+            // consider to speed up to the limit
+            if(target_velocity < SPEED_LIMIT - SPEED_INCREMENT_ACCELERATION)
+            {
+              target_velocity += SPEED_INCREMENT_ACCELERATION;
+            }
+            
+            // if we drive fast enough, the lane ahead is clean (therefore no lane change maneuver was considered), try to go to the lane on the right
+            if(target_velocity > MIN_CRUISING_SPEED && target_lane == current_lane && current_lane < 2)
+            {
+              // check if the lane on the right is not busy
+              if(!lane_is_busy(current_car_s, car_s, car_speed, current_lane + 1, previous_path_size, sensor_fusion))
+              {
+                // change the lane to the right
+                target_lane = current_lane + 1;
+              }
+            }
+          }
+
+        
+          // lane change is only allowed every N sec
+          if(lane_change_counter > 0)
+          {
+            lane_change_counter -= (50 - previous_path_size);
+          }
+
+          if(current_lane != target_lane && lane_change_counter <= 0)
+          {
+            current_lane = target_lane;
+            lane_change_counter = 50 * MIN_LANE_CHANGE_INTERVAL;
+          }
+
+          // Start with sparse way-points
+          vector<double> sparse_points_x;
+          vector<double> sparse_points_y;
+
+          double ref_x = car_x;
+          double ref_y = car_y;
+          double ref_yaw = deg2rad(car_yaw);
+
+          if(previous_path_size < 2)
+          {
+            double prev_car_x = car_x - cos(car_yaw);
+            double prev_car_y = car_y - sin(car_yaw);
+
+            sparse_points_x.push_back(prev_car_x);
+            sparse_points_x.push_back(car_x);
+
+            sparse_points_y.push_back(prev_car_y);
+            sparse_points_y.push_back(car_y);
+          }
+          else
+          {
+            ref_x = previous_path_x[previous_path_size - 1];
+            ref_y = previous_path_y[previous_path_size - 1];
+
+            double ref_x_prev = previous_path_x[previous_path_size - 2];
+            double ref_y_prev = previous_path_y[previous_path_size - 2];
+
+            ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+            
+            sparse_points_x.push_back(ref_x_prev);
+            sparse_points_x.push_back(ref_x);
+
+            sparse_points_y.push_back(ref_y_prev);
+            sparse_points_y.push_back(ref_y);
+          }
+
+          // fill in sparse waypoints with several points ahead of the current location with a fixed interval
+          for(int i = 1; i <= 3; i++)
+          {
+            vector<double> next_way_point = getXY(car_s + 30 * i, 2 + current_lane * 4, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            sparse_points_x.push_back(next_way_point[0]);
+            sparse_points_y.push_back(next_way_point[1]);
+          }
+
+          for(int i = 0; i < sparse_points_x.size(); i++)
+          {
+
+            double shifted_x = sparse_points_x[i] - ref_x;
+            double shifted_y = sparse_points_y[i] - ref_y;
+
+            sparse_points_x[i] = shifted_x * cos(0-ref_yaw) - shifted_y * sin(0-ref_yaw);
+            sparse_points_y[i] = shifted_x * sin(0-ref_yaw) + shifted_y * cos(0-ref_yaw);
+          }
+
+          tk::spline s;
+
+          s.set_points(sparse_points_x, sparse_points_y);
 
           vector<double> next_x_vals;
           vector<double> next_y_vals;
+
+          // fill in all the points from the previous path (not travelled yet)
+          for(int i = 0; i < previous_path_size; i++)
+          {
+            next_x_vals.push_back(previous_path_x[i]);
+            next_y_vals.push_back(previous_path_y[i]);
+          }
+
+          double target_x = 30.0;
+          double target_y = s(target_x);
+          double target_distance = sqrt(target_x * target_x + target_y * target_y);
+
+          double x_add_on = 0;
+          
+          for(int i = 1; i <= 50 - previous_path_size; i++)
+          {
+            double N = target_distance / (0.02 * target_velocity / 2.24);
+            double x_point = x_add_on + target_x / N;
+            double y_point = s(x_point);
+
+            x_add_on = x_point;
+
+            // rotate and shift back
+            double x_shift = x_point;
+            double y_shift = y_point;
+            x_point = x_shift * cos(ref_yaw) - y_shift * sin(ref_yaw);
+            y_point = x_shift * sin(ref_yaw) + y_shift * cos(ref_yaw);
+            x_point += ref_x;
+            y_point += ref_y;
+            
+            next_x_vals.push_back(x_point);
+            next_y_vals.push_back(y_point);
+          }
 
           /**
            * TODO: define a path made up of (x,y) points that the car will visit
            *   sequentially every .02 seconds
            */
+          //vector<double> next_x_vals;
+          //vector<double> next_y_vals;
+          
+          /*
+          // Driving straight line
 
+          /*
+          double dist_inc = 0.5;
+          for (int i = 0; i < 50; ++i) {
+            next_x_vals.push_back(car_x+(dist_inc*i)*cos(deg2rad(car_yaw)));
+            next_y_vals.push_back(car_y+(dist_inc*i)*sin(deg2rad(car_yaw)));
+          }
+          */
+          // in Frenet coordinates
+          /*
+          double dist_inc = 0.5;
+          for (int i = 0; i < 50; ++i) {
+            double next_s = car_s + (i + 1) * dist_inc;
+            double next_d = 6;
+            vector<double> next_xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            next_x_vals.push_back(next_xy[0]);
+            next_y_vals.push_back(next_xy[1]);
+          }
+          */
+
+          // Driving a circle
+          /*
+          double pos_x;
+          double pos_y;
+          double angle;
+          int path_size = previous_path_x.size();
+
+          for (int i = 0; i < path_size; ++i) {
+            next_x_vals.push_back(previous_path_x[i]);
+            next_y_vals.push_back(previous_path_y[i]);
+          }
+
+          if (path_size == 0) {
+            pos_x = car_x;
+            pos_y = car_y;
+            angle = deg2rad(car_yaw);
+          } else {
+            pos_x = previous_path_x[path_size-1];
+            pos_y = previous_path_y[path_size-1];
+
+            double pos_x2 = previous_path_x[path_size-2];
+            double pos_y2 = previous_path_y[path_size-2];
+            angle = atan2(pos_y-pos_y2,pos_x-pos_x2);
+          }
+
+          double dist_inc = 0.5;
+          for (int i = 0; i < 50-path_size; ++i) {    
+            next_x_vals.push_back(pos_x+(dist_inc)*cos(angle+(i+1)*(pi()/100)));
+            next_y_vals.push_back(pos_y+(dist_inc)*sin(angle+(i+1)*(pi()/100)));
+            pos_x += (dist_inc)*cos(angle+(i+1)*(pi()/100));
+            pos_y += (dist_inc)*sin(angle+(i+1)*(pi()/100));
+          }
+          */
+
+
+          json msgJson;
 
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;

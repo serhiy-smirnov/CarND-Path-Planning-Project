@@ -9,6 +9,35 @@
 using std::string;
 using std::vector;
 
+// multiplier used to maintain safety distance (speed in km/h is multiplied by this value to obtain rough distance in meters)
+// rule of thumb is kmh/2 which leads to pretty defencive driving style
+// lower values result in more aggressive driving
+// distance_front is used to calculate how close the ego car will approach other car from behind
+#define SAFETY_DISTANCE_FRONT (1.0/3)
+// distance_front_overtake is used to calculate how close the ego car will approach other car from behind in case of a lane change
+#define SAFETY_DISTANCE_FRONT_OVERTAKE (1.0/4)
+// distance_back is used to calculate how much the ego car will leave to the vehicle coming from behind in case of a lane change
+#define SAFETY_DISTANCE_BACK_OVERTAKE (1.0/5)
+
+// maximum cruising speed, mph
+#define SPEED_LIMIT 49.8
+
+// speed increment used for acceleration, mph
+#define SPEED_INCREMENT_ACCELERATION 0.224 * 5
+// speed increment used for braking, mph
+#define SPEED_INCREMENT_BRAKING 0.224 * 7
+
+// minimum speed considered for the lane change to the right, mph (German "Rechtsfahrgebot")
+// to turn off this behaviour - simply set this value to speed limit or above, so that the car never reaches it
+//#define MIN_CRUISING_SPEED 40
+#define MIN_CRUISING_SPEED 50
+
+// minimal interval between lane changes, seconds (to avoid shaking from lane to lane)
+#define MIN_LANE_CHANGE_INTERVAL  3
+
+#define LEFTMOST_LANE 0
+#define RIGHTMOST_LANE 2
+
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
 //   else the empty string "" will be returned.
@@ -153,5 +182,96 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s,
 
   return {x,y};
 }
+
+// checks if ego vehicle will collide with another vehicle in a target lane, given number of prediction steps and a safety range
+// returns true if collision is detected, false otherwise
+bool lane_is_busy(double ego_car_s, double ego_car_s_predicted, double ego_car_speed, int target_lane, int prediction_steps, vector<vector<double>> sensor_fusion) {
+  for(int i = 0; i < sensor_fusion.size(); i++)
+  {
+    // check whether the pther car's d coordinate falls into the desired lane we want to drive in
+    double other_car_d = sensor_fusion[i][6];
+    if(other_car_d > (target_lane * 4) && other_car_d < (target_lane * 4 + 4))
+    {
+      std::cout << std::endl << "Checking car " << sensor_fusion[i][0] << " in the lane " << target_lane << std::endl;
+
+      // the other car is in our tagret lane
+
+      double other_car_vx = sensor_fusion[i][3];
+      double other_car_vy = sensor_fusion[i][4];
+      double other_car_speed = sqrt(other_car_vx * other_car_vx + other_car_vy * other_car_vy);
+      double other_car_s = sensor_fusion[i][5];
+      std::cout << "Other car s now   = " << other_car_s << std::endl;
+      
+      // predict other car's next position at the same time as we have in our path
+      double other_car_s_predicted = other_car_s + other_car_speed * 0.02 * prediction_steps;
+      std::cout << "Other car s predicted   = " << other_car_s_predicted << std::endl;
+      if(other_car_s_predicted > ego_car_s_predicted && (other_car_s_predicted - ego_car_s_predicted) < (ego_car_speed * 3.6 * SAFETY_DISTANCE_FRONT_OVERTAKE))
+      {
+        std::cout << "Other car will be in front but too close" << std::endl;
+        return true;
+      }
+      if(ego_car_s_predicted > other_car_s_predicted  && (ego_car_s_predicted - other_car_s_predicted) < (other_car_speed * 3.6 * SAFETY_DISTANCE_BACK_OVERTAKE))
+      {
+        std::cout << "Ego car will be in front but too close" << std::endl;
+        return true;
+      }
+      if(other_car_s_predicted == ego_car_s_predicted)
+      {
+        std::cout << "Ego car will collide with the other car" << std::endl;
+        return true;
+      }
+    }
+  }
+  std::cout << "Lane change is safe" << std::endl;
+  return false;
+}
+
+// finds closest vehicle in front of the ego vehicle
+// returns speed of the closest vehicle
+double lane_speed(double ego_car_s_predicted, int target_lane, int prediction_steps, vector<vector<double>> sensor_fusion) {
+  
+  double min_distance_to_the_other_car = -1;
+  double closest_car_speed = SPEED_LIMIT;
+  
+  for(int i = 0; i < sensor_fusion.size(); i++)
+  {
+    // check whether the pther car's d coordinate falls into the desired lane we want to drive in
+    double other_car_d = sensor_fusion[i][6];
+    if(other_car_d > (target_lane * 4) && other_car_d < (target_lane * 4 + 4))
+    {
+      std::cout << std::endl << "Checking car " << sensor_fusion[i][0] << " in the lane " << target_lane << std::endl;
+
+      // the other car is in our tagret lane
+
+      double other_car_vx = sensor_fusion[i][3];
+      double other_car_vy = sensor_fusion[i][4];
+      double other_car_speed = sqrt(other_car_vx * other_car_vx + other_car_vy * other_car_vy);
+      double other_car_s = sensor_fusion[i][5];
+      std::cout << "Other car s now   = " << other_car_s << std::endl;
+      
+      // predict other car's next position at the same time as we have in our path
+      double other_car_s_predicted = other_car_s + other_car_speed * 0.02 * prediction_steps;
+      std::cout << "Other car s predicted   = " << other_car_s_predicted << std::endl;
+      if(other_car_s_predicted > ego_car_s_predicted)
+      {
+        double distance_to_the_other_car = other_car_s_predicted - ego_car_s_predicted;
+        if(min_distance_to_the_other_car < 0 || distance_to_the_other_car < min_distance_to_the_other_car)
+        {
+          min_distance_to_the_other_car = distance_to_the_other_car;
+          closest_car_speed = other_car_speed * 2.24;
+        }
+      }
+    }
+  }
+  // dont return speed more than the limit, even if some cars are going faster
+  if(closest_car_speed > SPEED_LIMIT)
+  {
+    closest_car_speed = SPEED_LIMIT;
+  }
+
+  std::cout << "Speed of the closest car in the lane # " << target_lane << " is " << closest_car_speed << std::endl;
+  return closest_car_speed;
+}
+
 
 #endif  // HELPERS_H
