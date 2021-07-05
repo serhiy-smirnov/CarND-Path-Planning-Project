@@ -25,7 +25,7 @@ using std::vector;
 // speed increment used for acceleration, mph
 #define SPEED_INCREMENT_ACCELERATION 0.224 * 5
 // speed increment used for braking, mph
-#define SPEED_INCREMENT_BRAKING 0.224 * 7
+#define SPEED_INCREMENT_BRAKING 0.224 * 5
 
 // minimum speed considered for the lane change to the right, mph (German "Rechtsfahrgebot")
 // to turn off this behaviour - simply set this value to speed limit or above, so that the car never reaches it
